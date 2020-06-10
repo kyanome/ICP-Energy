@@ -194,6 +194,7 @@ public:
      *  @return  A vector containing all unnormalized 3D model verticies.
      */
     std::vector<cv::Vec3f> getVertices();
+    std::vector<cv::Vec3f> getNormals();
     
     /**
      *  Returns the total number of 3D model verticies.

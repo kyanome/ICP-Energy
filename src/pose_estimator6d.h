@@ -107,6 +107,7 @@ public:
      *  @param undistortFrame A flag indicating whether the image should first be undistorted for initialization (default = true).
      *  @param undistortFrame A flag indicating whether it should be checked for a tracking loss after pose estimation (default = true).
      */
+    void estimatePoses_icp(std::vector<std::vector<cv::Vec3f>> &icp_verts);
     void estimatePoses(cv::Mat &frame, bool undistortFrame = true, bool checkForLoss = true);
     
     /**

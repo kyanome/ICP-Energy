@@ -78,6 +78,7 @@ public:
      *  @param  objects A collection 3d objects of which the poses are supposed to be optimized.
      *  @param  runs A factor specifiyng how many times the default number of iterations per level are supposed to be performed (default = 1).
      */
+    void minimize_icp(std::vector<Object3D*> &objects, std::vector<std::vector<cv::Vec3f>> &icp_verts);
     void minimize(std::vector<cv::Mat> &imagePyramid, std::vector<Object3D*> &objects, int runs = 1);
     
 private:
@@ -89,16 +90,18 @@ private:
     
     int width;
     int height;
-    
+
+    void runIteration_icp(std::vector<Object3D*>& objects, std::vector<std::vector<cv::Vec3f>> &icp_verts);
     void runIteration(std::vector<Object3D*> &objects, const std::vector<cv::Mat> &imagePyramid, int level);
     
+    void computeJacobians_icp(Object3D *object,  std::vector<std::vector<cv::Vec3f>> &icp_verts, cv::Matx66f &JTJ, cv::Matx61f &JT);
     void parallel_computeJacobians(Object3D *object, const cv::Mat &frame, const cv::Mat &depth, const cv::Mat &depthInv, const cv::Mat &sdt, const cv::Mat &xyPos, const cv::Rect &roi, const cv::Mat &mask, int m_id, int level, cv::Matx66f &wJTJ, cv::Matx61f &JT, int threads);
     
     cv::Rect compute2DROI(Object3D *object, const cv::Size &maxSize, int offset);
-    
+
+    void applyStepGaussNewton_icp(Object3D* object, const cv::Matx66f& JTJ, const cv::Matx61f& JT);
     void applyStepGaussNewton(Object3D *object, const cv::Matx66f &wJTJ, const cv::Matx61f &JT);
 };
-
 
 /**
  *  This class extends the OpenCV ParallelLoopBody for efficiently parallelized
@@ -468,6 +471,130 @@ public:
                 }
             }
         }
+    }
+};
+
+
+
+/**
+ *  This class extends the OpenCV ParallelLoopBody for efficiently parallelized
+ *  computations. Within the corresponding for loop, the Jacobian terms required for
+ *  the Gauss-Newton pose update step are computed for a single object.
+ */
+class computeJacobiansGN_icp: public cv::ParallelLoopBody
+{
+private:
+    
+    float *depthData;
+    
+    float focal_length_x, focal_length_y, principal_point_x, principal_point_y, _zNear, _zFar ;
+    
+    cv::Matx33f K_inv;
+    cv::Matx14f distCoeff;
+
+    cv::Matx44f poseData;
+    cv::Matx33f R;
+    cv::Vec3f trans;    
+
+    std::vector<cv::Vec3f> model_verts;
+    std::vector<cv::Vec3f> dest_points;
+    std::vector<cv::Vec3f> normals;
+
+    cv::Matx66f *_JTJCollection;
+    cv::Matx61f *_JTCollection;
+
+    
+public:
+    computeJacobiansGN_icp(Object3D* object, const std::vector<std::vector<cv::Vec3f>> &icp_verts, const cv::Matx33f &K, float zNear, float zFar, std::vector<cv::Matx66f> &JTJCollection, std::vector<cv::Matx61f> &JTCollection)
+    {
+
+        _JTJCollection = JTJCollection.data();
+        _JTCollection = JTCollection.data();
+
+        // intrinsic parameters
+        focal_length_x = K(0, 0);
+        focal_length_y = K(1, 1);
+        principal_point_x = K(0, 2);
+        principal_point_y = K(1, 2);
+
+        distCoeff = cv::Matx14f(0.0, 0.0, 0.0, 0.0);
+
+        _zNear = zNear;
+        _zFar = zFar;
+ 
+        // extrinsic parameters
+        poseData = object->getPose() * object->getNormalization();
+        R = cv::Matx33f(poseData(0,0), poseData(0,1), poseData(0,2), 
+                        poseData(1,0), poseData(1,1), poseData(1,2),
+                        poseData(2,0), poseData(2,1), poseData(2,2));
+        trans = cv::Vec3f(poseData(0,3), poseData(1,3), poseData(2,3));
+
+        // template shape
+        model_verts  = icp_verts[0];
+        dest_points  = icp_verts[1];
+        normals      = icp_verts[2];
+    }
+
+
+    virtual void operator()( const cv::Range &r ) const
+    {
+        float J[6];
+        float* JTJ = (float*)_JTJCollection[r.start].val;
+        float* JT = (float*)_JTCollection[r.start].val;
+        float all_residual;
+
+
+        for(int i=0; i<model_verts.size(); i++)
+        {
+            float sx =  cv::Vec3f(R(0,0), R(0,1), R(0,2)).dot(model_verts[i]) + trans[0]; 
+            float sy =  cv::Vec3f(R(1,0), R(1,1), R(1,2)).dot(model_verts[i]) + trans[1];
+            float sz =  cv::Vec3f(R(2,0), R(2,1), R(2,2)).dot(model_verts[i]) + trans[2];
+            cv::Vec3f s_bar = cv::Vec3f(sx, sy, sz);
+
+            float dx = dest_points[i][0];
+            float dy = dest_points[i][1];
+            float dz = dest_points[i][2];
+
+            float nx =  cv::Vec3f(R(0,0), R(0,1), R(0,2)).dot(normals[i]); 
+            float ny =  cv::Vec3f(R(1,0), R(1,1), R(1,2)).dot(normals[i]);
+            float nz =  cv::Vec3f(R(2,0), R(2,1), R(2,2)).dot(normals[i]);
+            cv::Vec3f n_bar = cv::Vec3f(nx, ny, nz);
+
+            float a1 = (  (nz*(sy - dy) - ny*(sz - dz))  +   ((nz*sy) - (ny*sz))  );
+            float a2 = (  (nx*(sz - dz) - nz*(sx - dx))  +   ((nx*sz) - (nz*sx))  );
+            float a3 = (  (ny*(sx - dx) - nx*(sy - dy))  +    ((ny*sx) - (nx*sy)) );
+            float a4 = nx;
+            float a5 = ny;
+            float a6 = nz;
+
+            float residual = n_bar.dot((s_bar - dest_points[i]));
+            all_residual += residual;
+
+            J[0] = a1;
+            J[1] = a2;
+            J[2] = a3;
+            J[3] = a4;
+            J[4] = a5;
+            J[5] = a6;
+
+            // compute and add the per pixel gradient
+            for (int n = 0; n < 6; n++)
+            {
+                JT[n] += J[n]*residual;
+            }
+            
+            // compute and add the per pixel Hessian approximation
+            for (int n = 0; n < 6; n++)
+            {
+                for (int m = n; m < 6; m++)
+                {
+                    JTJ[n * 6 + m] += J[n]*J[m];
+                }
+            }
+
+        }
+        std::cout << "all residual = " << all_residual << std::endl;
+
     }
 };
 

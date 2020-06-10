@@ -129,6 +129,11 @@ void PoseEstimator6D::toggleTracking(cv::Mat &frame, int objectIndex, bool undis
     }
 }
 
+void PoseEstimator6D::estimatePoses_icp(vector<vector<cv::Vec3f>> &icp_verts)
+{
+    optimizationEngine->minimize_icp(objects, icp_verts);
+}
+
 
 void PoseEstimator6D::estimatePoses(cv::Mat &frame, bool undistortFrame, bool checkForLoss)
 {

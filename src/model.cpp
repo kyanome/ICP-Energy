@@ -195,6 +195,11 @@ vector<Vec3f> Model::getVertices()
     return vertices;
 }
 
+vector<Vec3f> Model::getNormals()
+{
+    return normals;
+}
+
 int Model::getNumVertices()
 {
     return (int)vertices.size();

@@ -55,6 +55,13 @@ OptimizationEngine::~OptimizationEngine()
 }
 
 
+void OptimizationEngine::minimize_icp(vector<Object3D*>& objects, vector<vector<cv::Vec3f>> &icp_verts)
+{
+    // OPTIMIZATION 
+    runIteration_icp(objects, icp_verts);
+}
+
+
 void OptimizationEngine::minimize(vector<Mat>& imagePyramid, vector<Object3D*>& objects, int runs)
 {
     // OPTIMIZATION ITERATIONS
@@ -78,6 +85,27 @@ void OptimizationEngine::minimize(vector<Mat>& imagePyramid, vector<Object3D*>& 
     }
 }
 
+
+void OptimizationEngine::runIteration_icp(vector<Object3D*>& objects, vector<vector<cv::Vec3f>> &icp_verts)
+{
+
+    for(int o = 0; o < objects.size(); o++)
+    {
+        
+        // the hessian approximation
+        Matx66f JTJ;
+        // the gradient
+        Matx61f JT;
+
+        // compute the Jacobian terms (i.e. the gradient and the hessian approx.) needed for the Gauss-Newton step
+        computeJacobians_icp(objects[o], icp_verts, JTJ, JT);
+
+        // update the pose by computing the Gauss-Newton step
+        applyStepGaussNewton_icp(objects[o], JTJ, JT);
+        
+    }
+
+}
 
 
 void OptimizationEngine::runIteration(vector<Object3D*>& objects, const vector<Mat>& imagePyramid, int level)
@@ -200,6 +228,36 @@ void OptimizationEngine::parallel_computeJacobians(Object3D* object, const Mat& 
     }
 }
 
+void OptimizationEngine::computeJacobians_icp(Object3D* object, vector<vector<cv::Vec3f>> &icp_verts, Matx66f &JTJ, Matx61f &JT)
+{
+    float zNear = renderingEngine->getZNear();
+    float zFar = renderingEngine->getZFar();
+    Matx33f K = renderingEngine->getCalibrationMatrix().get_minor<3, 3>(0, 0);
+    
+    JT = Matx61f::zeros();
+    JTJ = Matx66f::zeros();
+
+    vector<Matx61f> JTCollection(1);
+    vector<Matx66f> JTJCollection(1);
+
+    parallel_for_(cv::Range(0, 1), computeJacobiansGN_icp(object, icp_verts, K, zNear, zFar, JTJCollection, JTCollection));
+    for(int i = 0; i < 1; i++)
+    {
+        JT += JTCollection[i];
+        JTJ += JTJCollection[i];
+    }
+    
+    // copy the top right triangular matrix into the bottom left triangle
+    for(int i = 0; i < JTJ.rows; i++)
+    {
+        for(int j = i+1; j < JTJ.cols; j++)
+        {
+            JTJ(j, i) = JTJ(i, j);
+        }
+    }
+}
+
+
 Rect OptimizationEngine::compute2DROI(Object3D* object, const cv::Size& maxSize, int offset)
 {
     // PROJECT THE 3D BOUNDING BOX AS 2D ROI
@@ -234,6 +292,22 @@ Rect OptimizationEngine::compute2DROI(Object3D* object, const cv::Size& maxSize,
     
     return roi;
 }
+
+void OptimizationEngine::applyStepGaussNewton_icp(Object3D* object, const Matx66f& JTJ, const Matx61f& JT)
+{
+    // Gauss-Newton step in se3
+    Matx61f delta_xi = -JTJ.inv(DECOMP_CHOLESKY)*JT;
+    
+    // get the current pose
+    Matx44f T_cm = object->getPose();
+    
+    // apply the update step in SE3
+    T_cm = Transformations::exp(delta_xi)*T_cm;
+    
+    // set the updated pose
+    object->setPose(T_cm);
+}
+
 
 void OptimizationEngine::applyStepGaussNewton(Object3D* object, const Matx66f& wJTJ, const Matx61f& JT)
 {
